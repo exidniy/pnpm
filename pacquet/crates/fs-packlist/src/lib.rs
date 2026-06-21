@@ -1,7 +1,12 @@
-//! Decide which files inside an extracted git-hosted package end up in
-//! the CAS. Port of [`npm-packlist`](https://github.com/npm/npm-packlist)
+//! Decide which files inside a package directory end up in a published
+//! tarball. Port of [`npm-packlist`](https://github.com/npm/npm-packlist)
 //! and pnpm's
 //! [`fs/packlist`](https://github.com/pnpm/pnpm/blob/94240bc046/fs/packlist/src/index.ts).
+//!
+//! Both `pacquet pack` (computing a tarball's contents) and the
+//! git / directory fetchers (deciding what to import into the CAS) need
+//! this, so it lives in its own crate matching pnpm's standalone
+//! `@pnpm/fs.packlist` package.
 //!
 //! The algorithm has four passes:
 //!
@@ -34,12 +39,14 @@
 //!   rare configuration in the wild. Documented gap; revisit if a
 //!   real package surfaces it.
 //! - `.git/info/exclude` and global `~/.gitignore` are NOT honored —
-//!   only the in-tree `.gitignore` / `.npmignore` files. The fetcher
-//!   imports a clean tarball / git checkout, not a user's working
-//!   tree, so the global-state ignores are wrong by construction.
+//!   only the in-tree `.gitignore` / `.npmignore` files. Callers pass
+//!   a clean tarball / git checkout or a project directory, not a
+//!   user's working tree, so the global-state ignores are wrong by
+//!   construction.
 
-use crate::error::PacklistError;
+use derive_more::{Display, Error};
 use ignore::{WalkBuilder, gitignore::Gitignore};
+use pacquet_diagnostics::miette::{self, Diagnostic};
 use pacquet_package_manifest::safe_read_package_json_from_dir;
 use serde_json::Value;
 use std::{
@@ -47,6 +54,23 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
+
+#[cfg(test)]
+mod tests;
+
+/// Error type of [`packlist`]. Surfaces the subset of npm-packlist
+/// failures the current scope can produce.
+#[derive(Debug, Display, Error, Diagnostic)]
+#[non_exhaustive]
+pub enum PacklistError {
+    #[display("I/O error while computing packlist for {pkg_dir}: {source}")]
+    #[diagnostic(code(pacquet_fs_packlist::io))]
+    Io {
+        pkg_dir: String,
+        #[error(source)]
+        source: std::io::Error,
+    },
+}
 
 /// Cap on `bundleDependencies` recursion depth. Real packages bundle
 /// at most a handful of levels (most published packages bundle zero;
@@ -114,7 +138,7 @@ fn packlist_inner(
     let canonical = fs::canonicalize(pkg_dir).unwrap_or_else(|_| pkg_dir.to_path_buf());
     if !visited.insert(canonical) {
         tracing::warn!(
-            target: "pacquet::git_fetcher::packlist",
+            target: "pacquet::fs_packlist",
             pkg_dir = %pkg_dir.display(),
             "bundleDependencies cycle: directory already visited at this canonical path; skipping",
         );
@@ -122,7 +146,7 @@ fn packlist_inner(
     }
     if depth > MAX_BUNDLE_DEPTH {
         tracing::warn!(
-            target: "pacquet::git_fetcher::packlist",
+            target: "pacquet::fs_packlist",
             pkg_dir = %pkg_dir.display(),
             depth,
             "bundleDependencies recursion exceeded MAX_BUNDLE_DEPTH; refusing to descend further",
@@ -150,8 +174,7 @@ fn packlist_inner(
     // every filter explicitly. `git_ignore(true)` /
     // `add_custom_ignore_filename(".npmignore")` enable the two ignore
     // file sources; `require_git(false)` makes `ignore` honor
-    // `.gitignore` even though a git-hosted snapshot's `.git/` has
-    // already been deleted by [`crate::GitFetcher`] before this point.
+    // `.gitignore` even when no `.git/` directory is present.
     let mut builder = WalkBuilder::new(pkg_dir);
     builder
         .standard_filters(false)
@@ -163,8 +186,8 @@ fn packlist_inner(
         // Don't search parent directories of `pkg_dir` for ignore
         // files: the packlist must depend only on the contents of the
         // package directory itself. Otherwise a `.gitignore` in the
-        // workspace root above a git-hosted snapshot's working copy
-        // would leak into the published file set.
+        // workspace root above the package would leak into the
+        // published file set.
         .parents(false)
         .add_custom_ignore_filename(".npmignore");
 
@@ -254,7 +277,7 @@ fn packlist_inner(
         // refusal so the gap is observable in install logs.
         if !is_safe_bundle_name(&bundle_name) {
             tracing::warn!(
-                target: "pacquet::git_fetcher::packlist",
+                target: "pacquet::fs_packlist",
                 bundle_name = %bundle_name,
                 pkg_dir = %pkg_dir.display(),
                 "rejecting bundleDependencies entry that is not a single path segment",
@@ -264,7 +287,7 @@ fn packlist_inner(
         let bundle_pkg_dir = pkg_dir.join("node_modules").join(&bundle_name);
         if !bundle_pkg_dir.is_dir() {
             tracing::debug!(
-                target: "pacquet::git_fetcher::packlist",
+                target: "pacquet::fs_packlist",
                 bundle_name = %bundle_name,
                 pkg_dir = %pkg_dir.display(),
                 "bundleDependencies entry not present under node_modules/; skipping",
@@ -303,7 +326,7 @@ fn build_files_matcher(pkg_dir: &Path, entries: &[Value]) -> Option<Gitignore> {
         }
         if let Err(error) = builder.add_line(None, &pattern) {
             tracing::debug!(
-                target: "pacquet::git_fetcher::packlist",
+                target: "pacquet::fs_packlist",
                 ?pattern,
                 ?error,
                 "skipping invalid `files` entry",
@@ -319,7 +342,7 @@ fn build_files_matcher(pkg_dir: &Path, entries: &[Value]) -> Option<Gitignore> {
         Ok(gi) => Some(gi),
         Err(error) => {
             tracing::debug!(
-                target: "pacquet::git_fetcher::packlist",
+                target: "pacquet::fs_packlist",
                 ?error,
                 "failed to build `files`-field matcher; treating field as absent",
             );
@@ -460,6 +483,3 @@ fn into_io(err: ignore::Error) -> std::io::Error {
     err.into_io_error()
         .unwrap_or_else(|| std::io::Error::other("ignore walker produced a non-io error"))
 }
-
-#[cfg(test)]
-mod tests;

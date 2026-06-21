@@ -28,6 +28,7 @@ pacquet-lockfile                          = { workspace = true }
 pacquet-network                           = { workspace = true }
 pacquet-config                            = { workspace = true }
 pacquet-default-reporter                  = { workspace = true }
+pacquet-pack                              = { workspace = true }
 pacquet-package-manifest                  = { workspace = true }
 pacquet-package-manager                   = { workspace = true }
 pacquet-package-is-installable            = { workspace = true }
@@ -59,6 +60,7 @@ serde        = { workspace = true }
 serde_json   = { workspace = true }
 tabled       = { workspace = true }
 tokio        = { workspace = true }
+tracing      = { workspace = true }
 which        = { workspace = true }
 base64       = { workspace = true }
 

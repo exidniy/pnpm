@@ -5,6 +5,7 @@ pub mod dlx;
 pub mod exec;
 pub mod install;
 pub mod outdated;
+pub mod pack;
 pub mod recursive;
 pub mod remove;
 pub mod restart;
@@ -26,6 +27,7 @@ use exec::ExecArgs;
 use install::InstallArgs;
 use miette::{Context, IntoDiagnostic};
 use outdated::{OutdatedArgs, OutdatedOutcome};
+use pack::PackArgs;
 use pacquet_config::{Config, Host};
 use pacquet_default_reporter::DefaultReporter;
 use pacquet_executor::execute_shell;
@@ -136,6 +138,8 @@ pub enum CliCommand {
     Outdated(OutdatedArgs),
     /// Shows the packages that depend on `pkg`
     Why(WhyArgs),
+    /// Create a tarball from a package
+    Pack(PackArgs),
     /// Removes packages from `node_modules` and from the project's `package.json`.
     // Unlike npm, pnpm does not treat "r" as an alias of "remove" to avoid
     // confusion with "run" and "recursive". Mirrors pnpm's `commandNames`.
@@ -321,6 +325,26 @@ impl CliArgs {
             }
             CliCommand::Why(args) => {
                 args.run(state(true)?).await?;
+            }
+            // `pack` prints the tarball summary (or JSON) its handler
+            // returns; the reporter type only affects the lifecycle-script
+            // output, so it's threaded into `run` and the result printed
+            // here, mirroring pnpm's `handler` → CLI print split.
+            CliCommand::Pack(args) => {
+                let output = match reporter {
+                    ReporterType::Default | ReporterType::AppendOnly => {
+                        args.run::<DefaultReporter>(&dir, config()?, recursive)?
+                    }
+                    ReporterType::Ndjson => {
+                        args.run::<NdjsonReporter>(&dir, config()?, recursive)?
+                    }
+                    ReporterType::Silent => {
+                        args.run::<SilentReporter>(&dir, config()?, recursive)?
+                    }
+                };
+                if !output.is_empty() {
+                    println!("{output}");
+                }
             }
             CliCommand::Remove(args) => match reporter {
                 ReporterType::Default | ReporterType::AppendOnly => {
