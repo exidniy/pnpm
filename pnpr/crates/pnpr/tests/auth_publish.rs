@@ -37,8 +37,10 @@ fn static_config_with_packages(dir: &TempDir, packages_block: &str) -> (Config, 
         format!("storage: {}\nuplinks: {{}}\npackages:\n{packages_block}\n", storage.display());
     let config_path = dir.path().join("config.yaml");
     std::fs::write(&config_path, yaml).unwrap();
-    let config =
+    let mut config =
         Config::from_yaml(&config_path, listen, Some("http://example.test".to_string())).unwrap();
+    // Registration is opt-in; these tests create accounts via adduser.
+    config.auth.htpasswd.max_users = MaxUsers::Unlimited;
     (config, storage)
 }
 
