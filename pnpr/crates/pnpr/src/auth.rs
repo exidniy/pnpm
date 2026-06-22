@@ -131,16 +131,25 @@ impl std::fmt::Debug for AuthState {
 }
 
 impl AuthState {
-    /// All-in-memory auth state for surfaces that never expose
-    /// registration: a resolver-only deployment (registry disabled, so
-    /// the adduser route is not mounted) and tests that don't care
-    /// about persistence. Registration is left uncapped here because no
-    /// untrusted caller can reach it; the production registration path
-    /// goes through [`Self::load`], which honors `auth.htpasswd.max_users`.
+    /// All-in-memory auth state with registration left uncapped. For a
+    /// resolver-only deployment (registry disabled, so the adduser route
+    /// is not mounted) and tests that pre-seed users or don't exercise
+    /// the cap. Callers that mount the registry surface from config must
+    /// use [`Self::in_memory_with_max_users`] so the configured cap
+    /// applies; the production path goes through [`Self::load`].
     #[must_use]
     pub fn in_memory() -> Self {
+        Self::in_memory_with_max_users(MaxUsers::Unlimited)
+    }
+
+    /// All-in-memory auth state that honors `max_users`, so an embedder
+    /// building a registry via [`crate::router`] / [`crate::try_router`]
+    /// gets the same registration cap as the production [`Self::load`]
+    /// path instead of unconditionally open sign-ups.
+    #[must_use]
+    pub fn in_memory_with_max_users(max_users: MaxUsers) -> Self {
         Self {
-            users: Arc::new(UserStore::in_memory(MaxUsers::Unlimited)),
+            users: Arc::new(UserStore::in_memory(max_users)),
             tokens: Arc::new(TokenStore::in_memory()),
         }
     }

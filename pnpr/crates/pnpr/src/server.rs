@@ -167,14 +167,16 @@ impl PackageLocks {
 /// router level, so we take both via one handler that branches on
 /// the `@` prefix and the literal-`-` segment.
 pub fn router(config: Config) -> Router {
-    router_with_auth(config, AuthState::in_memory())
+    let auth = AuthState::in_memory_with_max_users(config.auth.htpasswd.max_users);
+    router_with_auth(config, auth)
 }
 
 /// Fallible counterpart to [`router`]: surfaces a missing/invalid OSV
 /// database (when `osv.enabled`) as an error instead of panicking, for
 /// embedders that build the router directly rather than via [`serve`].
 pub fn try_router(config: Config) -> crate::error::Result<Router> {
-    try_router_with_auth(config, AuthState::in_memory())
+    let auth = AuthState::in_memory_with_max_users(config.auth.htpasswd.max_users);
+    try_router_with_auth(config, auth)
 }
 
 /// Like [`router`] but with a caller-supplied [`AuthState`]. Used

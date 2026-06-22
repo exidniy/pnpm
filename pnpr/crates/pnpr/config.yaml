@@ -53,10 +53,12 @@ auth:
   htpasswd:
     file: ./htpasswd
     # Maximum number of users allowed to self-register. Registration is
-    # opt-in: it stays disabled unless this is set to a positive number
-    # (set it to -1 to keep it disabled explicitly). This mock registry
-    # opts in so the test suite can create accounts.
-    max_users: 1000
+    # opt-in and disabled by default (this `-1`, or omitting the key);
+    # set it to a positive number to allow anonymous clients to create
+    # accounts. This file is compiled into the binary as the fallback
+    # default config, so it stays locked down — deployments that want
+    # self-registration set a positive cap in their own config.
+    max_users: -1
 
 plugins: ../node_modules
 

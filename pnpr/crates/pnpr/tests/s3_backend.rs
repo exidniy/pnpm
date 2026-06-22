@@ -10,7 +10,7 @@ use axum::{
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use futures_util::StreamExt;
 use object_store::{ObjectStore, memory::InMemory, path::Path as ObjectPath};
-use pnpr::{Config, HostedStoreConfig, router};
+use pnpr::{Config, HostedStoreConfig, MaxUsers, router};
 use serde_json::{Value, json};
 use std::{
     fmt::Write,
@@ -28,6 +28,8 @@ fn s3_config(storage: PathBuf, store: Arc<dyn ObjectStore>) -> Config {
     let mut config = Config::static_serve(listen, storage);
     config.public_url = "http://example.test".to_string();
     config.hosted_store = HostedStoreConfig::S3 { store, prefix: String::new() };
+    // Registration is opt-in; these tests create accounts via adduser.
+    config.auth.htpasswd.max_users = MaxUsers::Unlimited;
     config
 }
 
