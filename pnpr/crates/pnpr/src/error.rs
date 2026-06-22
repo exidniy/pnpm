@@ -31,6 +31,15 @@ pub enum RegistryError {
         uplink: String,
     },
 
+    #[display("EINTEGRITY: tarball {filename:?} for package {package:?}: {reason}")]
+    #[from(skip)]
+    TarballIntegrity {
+        #[error(not(source))]
+        package: String,
+        filename: String,
+        reason: String,
+    },
+
     #[display("Package name {name:?} is not a valid npm package name")]
     InvalidPackageName {
         #[error(not(source))]
@@ -101,10 +110,26 @@ pub enum RegistryError {
         reason: String,
     },
 
-    /// `auth.htpasswd.max_users: -1` blocks new registrations.
-    /// Returned for adduser on a username that doesn't already
-    /// exist; existing-user logins are unaffected.
-    #[display("New user registration is disabled by auth.htpasswd.max_users: -1")]
+    #[display(
+        "Package {package}@{version} is listed in the local OSV database as vulnerable ({advisories})"
+    )]
+    #[from(skip)]
+    OsvVulnerability {
+        #[error(not(source))]
+        package: String,
+        #[error(not(source))]
+        version: String,
+        #[error(not(source))]
+        advisories: String,
+    },
+
+    /// New-user registration is off: `auth.htpasswd.max_users` is
+    /// unset (the secure default) or set to `-1`. Returned for adduser
+    /// on a username that doesn't already exist; existing-user logins
+    /// are unaffected.
+    #[display(
+        "New user registration is disabled. Set auth.htpasswd.max_users to a positive number to allow sign-ups"
+    )]
     RegistrationDisabled,
 
     /// `auth.htpasswd.max_users: N` cap reached. Returned for
@@ -179,6 +204,7 @@ impl RegistryError {
             RegistryError::Upstream { .. } => "upstream",
             RegistryError::UpstreamStatus { .. } => "upstream_status",
             RegistryError::UpstreamUnavailable { .. } => "upstream_unavailable",
+            RegistryError::TarballIntegrity { .. } => "tarball_integrity",
             RegistryError::InvalidPackageName { .. } => "invalid_package_name",
             RegistryError::InvalidTarballName { .. } => "invalid_tarball_name",
             RegistryError::InvalidPolicyPattern { .. } => "invalid_policy_pattern",
@@ -187,6 +213,7 @@ impl RegistryError {
             RegistryError::Forbidden { .. } => "forbidden",
             RegistryError::InvalidAttachment { .. } => "invalid_attachment",
             RegistryError::BadRequest { .. } => "bad_request",
+            RegistryError::OsvVulnerability { .. } => "osv_vulnerability",
             RegistryError::RegistrationDisabled => "registration_disabled",
             RegistryError::TooManyUsers { .. } => "too_many_users",
             RegistryError::Internal { .. } => "internal",
@@ -246,7 +273,9 @@ impl RegistryError {
                     StatusCode::BAD_GATEWAY
                 }
             }
-            RegistryError::UpstreamStatus { .. } => StatusCode::BAD_GATEWAY,
+            RegistryError::UpstreamStatus { .. } | RegistryError::TarballIntegrity { .. } => {
+                StatusCode::BAD_GATEWAY
+            }
             RegistryError::UpstreamUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
             RegistryError::InvalidPackageName { .. }
             | RegistryError::InvalidTarballName { .. }
@@ -256,6 +285,7 @@ impl RegistryError {
             | RegistryError::BadRequest { .. } => StatusCode::BAD_REQUEST,
             RegistryError::Unauthenticated { .. } => StatusCode::UNAUTHORIZED,
             RegistryError::Forbidden { .. } => StatusCode::FORBIDDEN,
+            RegistryError::OsvVulnerability { .. } => StatusCode::FORBIDDEN,
             RegistryError::RegistrationDisabled | RegistryError::TooManyUsers { .. } => {
                 StatusCode::FORBIDDEN
             }

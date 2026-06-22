@@ -88,6 +88,11 @@ pub(crate) fn validate_username(username: &str) -> Result<()> {
             reason: "username must not start or end with whitespace".to_string(),
         });
     }
+    if username.starts_with('#') {
+        return Err(RegistryError::BadRequest {
+            reason: "username must not start with '#'".to_string(),
+        });
+    }
     if contains_colon {
         return Err(RegistryError::BadRequest {
             reason: "username must not contain ':'".to_string(),
@@ -126,13 +131,20 @@ impl std::fmt::Debug for AuthState {
 }
 
 impl AuthState {
-    /// All-in-memory auth state. Used when no record backend is
-    /// configured and neither `auth.htpasswd.file` nor
-    /// `auth.tokens.file` are set, and by tests that don't care about
-    /// persistence.
+    /// All-in-memory auth state with open registration. Used by tests
+    /// and registry-mock-compatible programmatic routers.
     #[must_use]
     pub fn in_memory() -> Self {
-        Self { users: Arc::new(UserStore::in_memory()), tokens: Arc::new(TokenStore::in_memory()) }
+        Self::in_memory_with_max_users(MaxUsers::Unlimited)
+    }
+
+    /// All-in-memory auth state that enforces the resolved registration cap.
+    #[must_use]
+    pub fn in_memory_with_max_users(max_users: MaxUsers) -> Self {
+        Self {
+            users: Arc::new(UserStore::in_memory_with_max_users(max_users)),
+            tokens: Arc::new(TokenStore::in_memory()),
+        }
     }
 
     /// Build the auth state from the resolved config. A configured SQL
@@ -193,7 +205,7 @@ impl AuthState {
         }
         let users: Arc<dyn UserBackend> = match auth.htpasswd.file.clone() {
             Some(path) => Arc::new(UserStore::open(path, auth.htpasswd.max_users)?),
-            None => Arc::new(UserStore::in_memory()),
+            None => Arc::new(UserStore::in_memory_with_max_users(auth.htpasswd.max_users)),
         };
         let tokens: Arc<dyn TokenBackend> = match auth.tokens.file.clone() {
             Some(path) => Arc::new(TokenStore::open(path)?),
@@ -252,6 +264,16 @@ pub trait TokenBackend: Send + Sync {
     /// "not authenticated".
     async fn lookup(&self, raw: &str) -> Result<Option<String>>;
 
+    /// Resolve a raw token to its full record — the username plus the
+    /// `readonly` / `cidr_whitelist` restrictions that [`Self::lookup`]
+    /// drops. The request-time restriction gate needs those, so it goes
+    /// through here. `Ok(None)` for a token that was never issued (or was
+    /// revoked); `Err` only for a backing-store failure, never conflated
+    /// with "no such token".
+    async fn lookup_record(&self, raw: &str) -> Result<Option<TokenRecord>> {
+        self.find_by_key(&sha256_hex(raw.as_bytes())).await
+    }
+
     /// Snapshot the record for a token by its key (SHA-256 hex). Used
     /// to check ownership before revocation. `Ok(None)` if no such
     /// token; `Err` on a store failure.
@@ -294,16 +316,20 @@ pub struct UserStore {
 }
 
 impl UserStore {
-    /// In-memory store with no on-disk persistence. Used when
-    /// `auth.htpasswd.file` is unset and by the existing
-    /// `@pnpm/registry-mock` integration where every restart is a
-    /// fresh process.
+    /// In-memory store with no on-disk persistence and open registration.
+    /// Used by registry-mock-compatible programmatic routers.
     #[must_use]
     pub fn in_memory() -> Self {
+        Self::in_memory_with_max_users(MaxUsers::Unlimited)
+    }
+
+    /// In-memory store that enforces the resolved registration cap.
+    #[must_use]
+    pub fn in_memory_with_max_users(max_users: MaxUsers) -> Self {
         Self {
             users: Mutex::new(HashMap::new()),
             path: None,
-            max_users: MaxUsers::Unlimited,
+            max_users,
             bcrypt_cost: DEFAULT_BCRYPT_COST,
         }
     }
@@ -351,6 +377,8 @@ impl UserBackend for UserStore {
         username: &str,
         password: &str,
     ) -> Result<(UpsertOutcome, String)> {
+        validate_username(username)?;
+
         let existing_hash = {
             let users = self.users.lock().expect("UserStore mutex poisoned");
             users.get(username).cloned()
@@ -358,8 +386,6 @@ impl UserBackend for UserStore {
         if let Some(stored) = existing_hash {
             return verify_returning_user(username, password, stored).await;
         }
-
-        validate_username(username)?;
 
         // Brand-new user — check the registration cap before doing
         // the (expensive) bcrypt hash.
@@ -409,6 +435,10 @@ impl UserBackend for UserStore {
     }
 
     async fn verify(&self, username: &str, password: &str) -> Result<Option<String>> {
+        if validate_username(username).is_err() {
+            return Ok(None);
+        }
+
         let stored = {
             let users = self.users.lock().expect("UserStore mutex poisoned");
             users.get(username).cloned()
@@ -672,6 +702,13 @@ fn parse_htpasswd(raw: &str) -> std::result::Result<HashMap<String, String>, Str
         let hash = hash.trim();
         if user.is_empty() {
             return Err(format!("line {}: empty username", line_no + 1));
+        }
+        if let Err(err) = validate_username(user) {
+            let reason = match err {
+                RegistryError::BadRequest { reason } => reason,
+                err => err.to_string(),
+            };
+            return Err(format!("line {}: invalid username {user:?}: {reason}", line_no + 1));
         }
         if !is_supported_hash(hash) {
             return Err(format!(

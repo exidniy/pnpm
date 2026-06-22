@@ -82,9 +82,9 @@ pub struct Config {
     /// re-fetched from the resolved uplink. Ignored when no uplink
     /// matches.
     pub packument_ttl: Duration,
-    /// Per-package access and publish rules. [`Config::from_yaml`]
+    /// Per-package access, publish, and unpublish rules. [`Config::from_yaml`]
     /// compiles these from the YAML `packages:` block (each entry's
-    /// `access` / `publish` tokens); the programmatic
+    /// `access` / `publish` / `unpublish` tokens); the programmatic
     /// [`Config::proxy`] / [`Config::static_serve`] constructors use
     /// [`PackagePolicies::registry_mock_defaults`] instead, enforcing
     /// the `@private/*` and `@pnpm.e2e/needs-auth` rules
@@ -110,8 +110,8 @@ pub struct Config {
     /// switch both stores to one shared SQL database so several
     /// stateless pnpr replicas see a consistent set of accounts.
     pub backend: BackendConfig,
-    /// Optional local OSV database used by the resolver to reject known
-    /// vulnerable npm package versions without live API calls.
+    /// Optional local OSV database used by mounted surfaces to reject
+    /// known vulnerable npm package versions without live API calls.
     pub osv: OsvConfig,
     /// The npm-registry surface: packument and tarball reads, publish,
     /// unpublish, dist-tag, search, and the user/login endpoints. Enabled
@@ -297,25 +297,30 @@ pub struct TokensConfig {
 
 /// Three-state cap on `auth.htpasswd.max_users`:
 ///
-/// * absent → unlimited (verdaccio's `+infinity` default; the YAML
-///   `+inf` token is a float literal and won't parse into the
-///   `i64` field, so the only way to ask for "no cap" is to omit
-///   the key)
+/// * absent → registration disabled. Self-registration is opt-in:
+///   leaving the key out denies new sign-ups. Verdaccio defaults this
+///   to `+infinity`, but an open default lets any anonymous client
+///   create an account and then publish under an `$authenticated`
+///   policy, so pnpr refuses registration until an operator sets an
+///   explicit positive cap.
 /// * `-1` → registration disabled
 /// * non-negative `n` → at most `n` users
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum MaxUsers {
     #[default]
-    Unlimited,
     Disabled,
+    Unlimited,
     Limited(u64),
 }
 
 impl MaxUsers {
-    /// Translate the YAML value into [`MaxUsers`]. Verdaccio accepts
-    /// any signed integer here; negative anything other than `-1` is
-    /// nonsense and is treated as "disabled" to err on the side of
-    /// rejecting unsafe configs.
+    /// Translate an explicit YAML value into [`MaxUsers`]. Verdaccio
+    /// accepts any signed integer here; negative anything other than
+    /// `-1` is nonsense and is treated as "disabled" to err on the
+    /// side of rejecting unsafe configs. An omitted key never reaches
+    /// this function — it maps to [`MaxUsers::Disabled`] in
+    /// [`build_auth_config`], so there is no YAML spelling for
+    /// "unlimited".
     fn from_yaml(value: i64) -> Self {
         if value < 0 { MaxUsers::Disabled } else { MaxUsers::Limited(value as u64) }
     }
@@ -752,12 +757,11 @@ fn non_empty_token(token: &str) -> Option<String> {
     (!token.trim().is_empty()).then(|| token.to_string())
 }
 
-/// Per-package routing and access rules. `access` / `publish` are
-/// verdaccio permission lists (built-in groups like `$all` /
-/// `$authenticated` / `$anonymous`, plus usernames / group names),
-/// compiled into the [`PackagePolicies`] that gate reads and writes.
-/// `unpublish` is parsed but currently folded into `publish` at
-/// enforcement time. `proxy` selects the [`UplinkConfig`] by name.
+/// Per-package routing and access rules. `access` / `publish` /
+/// `unpublish` are verdaccio permission lists (built-in groups like
+/// `$all` / `$authenticated` / `$anonymous`, plus usernames / group
+/// names), compiled into the [`PackagePolicies`] that gate reads and
+/// writes. `proxy` selects the [`UplinkConfig`] by name.
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct PackageAccess {
     pub access: Option<AccessSpec>,
@@ -1301,7 +1305,7 @@ fn build_auth_config(file: &AuthFile, base_dir: &Path) -> AuthConfig {
     AuthConfig {
         htpasswd: HtpasswdConfig {
             file: htpasswd_file,
-            max_users: file.htpasswd.max_users.map_or(MaxUsers::Unlimited, MaxUsers::from_yaml),
+            max_users: file.htpasswd.max_users.map_or(MaxUsers::Disabled, MaxUsers::from_yaml),
         },
         tokens: TokensConfig { file: tokens_file },
     }
@@ -1421,11 +1425,11 @@ fn build_log_config(entry: Option<&LogEntryFile>) -> LogConfig {
 /// Compile the YAML `packages:` rules into the runtime
 /// [`PackagePolicies`], in declared order (first match wins). A
 /// missing `access` defaults to `$all`, a missing `publish` to
-/// `$authenticated` — the same safe fallback [`PackagePolicies`]
-/// applies to packages no rule matches. `unpublish` is parsed for
-/// config compatibility but not yet enforced separately (it folds
-/// into `publish`). Errors only on an invalid glob pattern — any
-/// token string is a valid group/username, as in verdaccio.
+/// `$authenticated`, and a missing, empty, or null `unpublish` denies
+/// destructive writes. The same safe fallback [`PackagePolicies`]
+/// applies to packages no rule matches. Errors only on an invalid glob
+/// pattern — any token string is a valid group/username, as in
+/// verdaccio.
 fn build_policies(
     packages: &IndexMap<String, PackageAccess>,
 ) -> Result<PackagePolicies, RegistryError> {
@@ -1440,7 +1444,11 @@ fn build_policies(
                 .publish
                 .as_ref()
                 .map_or_else(|| AccessList::parse("$authenticated"), AccessSpec::to_access_list);
-            PackagePolicy::new(pattern, access_list, publish_list)
+            let unpublish_list = access
+                .unpublish
+                .as_ref()
+                .map_or_else(AccessList::default, AccessSpec::to_access_list);
+            PackagePolicy::new(pattern, access_list, publish_list, unpublish_list)
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(PackagePolicies::new(rules))

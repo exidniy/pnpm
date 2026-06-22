@@ -443,6 +443,7 @@ fn from_default_yaml_parses_bundled_file() {
     let config = Config::from_default_yaml(Path::new("/tmp"), listen(), None);
     assert!(config.uplinks.contains_key("npmjs"));
     assert_eq!(config.uplinks["npmjs"].url, "https://registry.npmjs.org/");
+    assert_eq!(config.auth.htpasswd.max_users, super::MaxUsers::Disabled);
     // The bundled file routes the catch-all through npmjs.
     let (name, _) = config.resolve_uplink("lodash").expect("** -> npmjs in defaults");
     assert_eq!(name, "npmjs");
@@ -931,12 +932,27 @@ packages: {}
 }
 
 #[test]
-fn auth_block_absent_keeps_in_memory_defaults() {
+fn auth_block_absent_disables_registration_by_default() {
     let yaml = "storage: ./s\nuplinks: {}\npackages: {}\n";
     let config = Config::from_yaml_str(yaml, Path::new("/x"), listen(), None).unwrap();
     assert!(config.auth.htpasswd.file.is_none());
     assert!(config.auth.tokens.file.is_none());
-    assert_eq!(config.auth.htpasswd.max_users, super::MaxUsers::Unlimited);
+    // Registration is opt-in: an omitted cap denies new sign-ups.
+    assert_eq!(config.auth.htpasswd.max_users, super::MaxUsers::Disabled);
+}
+
+#[test]
+fn auth_max_users_absent_disables_registration() {
+    let yaml = "\
+storage: ./s
+auth:
+  htpasswd:
+    file: ./htpasswd
+uplinks: {}
+packages: {}
+";
+    let config = Config::from_yaml_str(yaml, Path::new("/x"), listen(), None).unwrap();
+    assert_eq!(config.auth.htpasswd.max_users, super::MaxUsers::Disabled);
 }
 
 #[test]
@@ -1382,6 +1398,7 @@ packages:
   '@secret/*':
     access: $authenticated
     publish: $authenticated
+    unpublish: admin
   '**':
     access: $all
     publish: $authenticated
@@ -1393,6 +1410,8 @@ packages:
     let public = config.policies.for_package("lodash");
     assert!(public.access.allows(&Identity::Anonymous));
     assert!(!public.publish.allows(&Identity::Anonymous));
+    assert!(!secret.unpublish.allows(&user("alice")));
+    assert!(secret.unpublish.allows(&user("admin")));
 }
 
 #[test]
@@ -1426,6 +1445,60 @@ packages:
     assert!(effective.access.allows(&Identity::Anonymous));
     assert!(!effective.publish.allows(&Identity::Anonymous));
     assert!(effective.publish.allows(&user("alice")));
+    assert!(!effective.unpublish.allows(&Identity::Anonymous));
+    assert!(!effective.unpublish.allows(&user("alice")));
+}
+
+#[test]
+fn policy_missing_unpublish_denies_destructive_writes() {
+    let yaml = "\
+storage: ./s
+uplinks: {}
+packages:
+  '@team/*':
+    publish: alice
+";
+    let config = Config::from_yaml_str(yaml, Path::new("/x"), listen(), None).unwrap();
+    let team = config.policies.for_package("@team/x");
+    assert!(team.publish.allows(&user("alice")));
+    assert!(!team.publish.allows(&user("bob")));
+    assert!(!team.unpublish.allows(&user("alice")));
+    assert!(!team.unpublish.allows(&user("bob")));
+}
+
+#[test]
+fn policy_empty_unpublish_denies_destructive_writes() {
+    let as_null = "\
+storage: ./s
+uplinks: {}
+packages:
+  '@team/*':
+    publish: $authenticated
+    unpublish:
+";
+    let as_empty_string = "\
+storage: ./s
+uplinks: {}
+packages:
+  '@team/*':
+    publish: $authenticated
+    unpublish: ''
+";
+    let as_empty_sequence = "\
+storage: ./s
+uplinks: {}
+packages:
+  '@team/*':
+    publish: $authenticated
+    unpublish: []
+";
+    for yaml in [as_null, as_empty_string, as_empty_sequence] {
+        let config = Config::from_yaml_str(yaml, Path::new("/x"), listen(), None).unwrap();
+        let team = config.policies.for_package("@team/x");
+        assert!(team.publish.allows(&user("alice")), "{yaml}");
+        assert!(!team.unpublish.allows(&Identity::Anonymous), "{yaml}");
+        assert!(!team.unpublish.allows(&user("alice")), "{yaml}");
+    }
 }
 
 #[test]
